@@ -60,7 +60,7 @@
 <body>
 
 <h1>Aplanador PDF</h1>
-<p>Analiza las caracter&iacute;sticas de un PDF y genera una copia plana sin cifrado, contrase&ntilde;as ni restricciones.</p>
+<p>Analiza las caracter&iacute;sticas de un PDF y, solo si tiene cifrado o restricciones, genera una copia plana sin contrase&ntilde;as ni limitaciones. Si el PDF est&aacute; limpio, no hace nada.</p>
 
 <!-- FILE INPUT -->
 <div class="card">
@@ -391,14 +391,34 @@ var PdfFlatten = (function() {
     return new File([out], name, {type:"application/pdf"});
   }
 
-  async function process(file, password, opts) {
-    var a = await analyze(file, password);
-    if (a.needsPassword) return {analysis:a, flatFile:null};
-    var f = await flatten(file, password, opts);
-    return {analysis:a, flatFile:f};
+  // Determina si un PDF necesita aplanado basandose en el analisis.
+  // Devuelve un objeto { needed:bool, reasons:string[] }
+  function needsFlatten(analysis) {
+    var reasons = [];
+    var enc = analysis.encryption;
+    if (enc.encrypted) {
+      reasons.push("Cifrado con " + enc.algorithm + " (" + enc.keyLength + " bits)");
+      if (enc.permissions) {
+        if (!enc.permissions.copy)     reasons.push("Copia de texto denegada");
+        if (!enc.permissions.modify)   reasons.push("Modificaci\u00f3n denegada");
+        if (!enc.permissions.print)    reasons.push("Impresi\u00f3n denegada");
+        if (!enc.permissions.annotate) reasons.push("Anotaciones denegadas");
+        if (!enc.permissions.fillForms) reasons.push("Formularios denegados");
+      }
+    }
+    return { needed: reasons.length > 0, reasons: reasons };
   }
 
-  return { analyze:analyze, flatten:flatten, process:process };
+  async function process(file, password, opts) {
+    var a = await analyze(file, password);
+    if (a.needsPassword) return {analysis:a, flatFile:null, skipped:false};
+    var check = needsFlatten(a);
+    if (!check.needed) return {analysis:a, flatFile:null, skipped:true, reasons:[]};
+    var f = await flatten(file, password, opts);
+    return {analysis:a, flatFile:f, skipped:false, reasons:check.reasons};
+  }
+
+  return { analyze:analyze, flatten:flatten, process:process, needsFlatten:needsFlatten };
 })();
 
 /* ============================================================
@@ -417,7 +437,7 @@ var resultPanel = document.getElementById("resultPanel");
 var progressWrap = document.getElementById("progressWrap");
 var progressFill = document.getElementById("progressFill");
 
-var currentFile = null, usedPassword;
+var currentFile = null, usedPassword, lastAnalysis = null;
 
 fileInput.addEventListener("change", function() {
   if (!fileInput.files.length) return;
@@ -441,8 +461,25 @@ function doAnalysis(pw) {
       return;
     }
     passwordRow.style.display = "none";
+    lastAnalysis = r;
     showAnalysis(r);
-    btnFlatten.disabled = false;
+
+    // Evaluar si necesita aplanado
+    var check = PdfFlatten.needsFlatten(r);
+    if (check.needed) {
+      btnFlatten.disabled = false;
+      btnFlatten.textContent = "Generar PDF plano (_pl)";
+    } else {
+      btnFlatten.disabled = true;
+      // Mostrar mensaje de que no necesita aplanado
+      logSection.classList.remove("hidden");
+      logPanel.textContent = "El PDF no necesita aplanado.\n\n";
+      logPanel.textContent += "No se han detectado caracter\u00edsticas problem\u00e1ticas:\n";
+      logPanel.textContent += "  - Sin cifrado\n";
+      logPanel.textContent += "  - Sin restricciones de permisos\n";
+      logPanel.textContent += "  - Sin contrase\u00f1a de propietario\n";
+      logPanel.textContent += "\nEl fichero original se puede usar directamente.";
+    }
   }).catch(function(e) {
     analysisPanel.innerHTML = "<p>Error: " + e.message + "</p>";
     analysisSection.classList.remove("hidden");
@@ -479,6 +516,16 @@ function showAnalysis(r) {
     h += R("Accesibilidad", yn(e.permissions.accessibility));
     h += R("Ensamblar", yn(e.permissions.assemble));
   }
+  // Veredicto
+  var check = PdfFlatten.needsFlatten(r);
+  h += S("Veredicto");
+  if (check.needed) {
+    h += R("Necesita aplanado", "<span class='no'>S\u00ed</span>");
+    h += R("Motivos", check.reasons.join("<br>"));
+  } else {
+    h += R("Necesita aplanado", "<span class='yes'>No &mdash; PDF limpio, se puede usar directamente</span>");
+  }
+
   h += S("Dimensiones");
   for (var i=0; i<r.pages.length && i<5; i++) {
     var p = r.pages[i];
