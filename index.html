@@ -1,0 +1,292 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+<meta charset="UTF-8">
+<title>Aplanador PDF</title>
+</head>
+<body>
+<h2>Aplanador PDF</h2>
+<p>Seleccione un PDF para analizar sus caracter&iacute;sticas y generar una copia plana
+sin cifrado, contrase&ntilde;as ni restricciones.</p>
+<hr>
+
+<!-- ENTRADA -->
+<p><label>Archivo PDF: <input type="file" id="fileInput" accept=".pdf"></label></p>
+<div id="passwordRow" style="display:none">
+  <p>
+    <label>Contrase&ntilde;a de apertura: <input type="password" id="pdfPassword" size="30"></label>
+    <button id="btnRetry">Abrir</button>
+  </p>
+</div>
+
+<!-- ANALISIS -->
+<div id="analysisSection" style="display:none">
+  <h3>Caracter&iacute;sticas del PDF original</h3>
+  <div id="analysisPanel"></div>
+</div>
+
+<!-- BOTONES -->
+<p>
+  <button id="btnFlatten" disabled>Generar PDF plano (_pl)</button>
+  <button id="btnReset">Limpiar</button>
+</p>
+
+<!-- LOG -->
+<div id="logSection" style="display:none">
+  <h3>Registro</h3>
+  <pre id="logPanel" style="background:#eee;padding:8px;border:1px solid #ccc;max-height:200px;overflow:auto"></pre>
+</div>
+
+<!-- RESULTADO -->
+<div id="resultSection" style="display:none">
+  <h3>Caracter&iacute;sticas del PDF resultante</h3>
+  <div id="resultPanel"></div>
+</div>
+
+<hr>
+
+<!-- EJEMPLO DE INTEGRACION -->
+<details>
+  <summary><b>Ejemplo de integraci&oacute;n en formulario</b></summary>
+  <br>
+  <form id="demoForm" action="/api/upload" method="POST" enctype="multipart/form-data">
+    <p><label>Nombre: <input type="text" name="nombre" value="Test"></label></p>
+    <p><label>Documento: <input type="file" id="formPdfInput" name="documento" accept=".pdf"></label></p>
+    <p id="formStatus"></p>
+    <p><button type="submit">Enviar</button></p>
+  </form>
+  <pre id="formLog" style="background:#eee;padding:8px;border:1px solid #ccc;max-height:150px;overflow:auto"></pre>
+
+  <h4>C&oacute;digo de integraci&oacute;n</h4>
+<pre style="background:#f8f8f8;padding:12px;border:1px solid #ddd">
+&lt;!-- 1. pdf.js desde CDN --&gt;
+&lt;script src="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.min.js"&gt;&lt;/script&gt;
+&lt;script&gt;
+  pdfjsLib.GlobalWorkerOptions.workerSrc =
+    "https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.worker.min.js";
+&lt;/script&gt;
+
+&lt;!-- 2. Librer&iacute;a ofuscada --&gt;
+&lt;script src="pdf-flatten.min.js"&gt;&lt;/script&gt;
+
+&lt;!-- 3. Interceptar el env&iacute;o --&gt;
+&lt;script&gt;
+document.getElementById("miForm").addEventListener("submit", async function(e) {
+  e.preventDefault();
+  var input = document.getElementById("pdfInput");
+  var fd = new FormData(this);
+  if (input.files[0]) {
+    var clean = await PdfFlatten.flatten(input.files[0]);
+    fd.set("documento", clean, clean.name);
+  }
+  await fetch(this.action, { method: "POST", body: fd });
+});
+&lt;/script&gt;
+</pre>
+</details>
+
+<hr>
+<small>Aplanador PDF v1.0 &mdash; <a href="https://github.com/oscavi/apla_pdf">GitHub</a></small>
+
+<!-- DEPENDENCIAS -->
+<script src="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.min.js"></script>
+<script>
+  pdfjsLib.GlobalWorkerOptions.workerSrc =
+    "https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.worker.min.js";
+</script>
+<script src="pdf-flatten.min.js"></script>
+
+<script>
+/* ============================
+   ANALIZADOR PRINCIPAL
+   ============================ */
+var fileInput = document.getElementById("fileInput");
+var passwordRow = document.getElementById("passwordRow");
+var pdfPassword = document.getElementById("pdfPassword");
+var btnRetry = document.getElementById("btnRetry");
+var analysisSection = document.getElementById("analysisSection");
+var analysisPanel = document.getElementById("analysisPanel");
+var btnFlatten = document.getElementById("btnFlatten");
+var btnReset = document.getElementById("btnReset");
+var logSection = document.getElementById("logSection");
+var logPanel = document.getElementById("logPanel");
+var resultSection = document.getElementById("resultSection");
+var resultPanel = document.getElementById("resultPanel");
+
+var currentFile = null;
+var usedPassword = undefined;
+
+fileInput.addEventListener("change", function() {
+  if (fileInput.files.length) { currentFile = fileInput.files[0]; usedPassword = undefined; reset(); doAnalysis(); }
+});
+btnRetry.addEventListener("click", function() { usedPassword = pdfPassword.value; doAnalysis(usedPassword); });
+pdfPassword.addEventListener("keydown", function(e) { if (e.key === "Enter") { usedPassword = pdfPassword.value; doAnalysis(usedPassword); } });
+
+function doAnalysis(password) {
+  PdfFlatten.analyze(currentFile, password).then(function(r) {
+    if (r.needsPassword) {
+      passwordRow.style.display = "block";
+      analysisPanel.innerHTML = "<p><b>" + (r.wrongPassword ? "Contrase\u00f1a incorrecta." : "El PDF requiere contrase\u00f1a de apertura.") + "</b></p>";
+      analysisSection.style.display = "block";
+      pdfPassword.focus();
+      return;
+    }
+    passwordRow.style.display = "none";
+    showAnalysis(r);
+    btnFlatten.disabled = false;
+  }).catch(function(err) {
+    analysisPanel.innerHTML = "<p>Error: " + err.message + "</p>";
+    analysisSection.style.display = "block";
+  });
+}
+
+function showAnalysis(r) {
+  var enc = r.encryption;
+  var h = "<table border='1' cellpadding='4' cellspacing='0'>";
+  h += sec("Informaci\u00f3n general");
+  h += row("Fichero", r.fileName);
+  h += row("Tama\u00f1o", fmtB(r.fileSize));
+  h += row("Versi\u00f3n", r.pdfVersion ? "PDF " + r.pdfVersion : "N/D");
+  h += row("P\u00e1ginas", r.numPages);
+  h += row("Creador", r.creator || "N/D");
+  h += row("Productor", r.producer || "N/D");
+  h += row("Creaci\u00f3n", r.creationDate || "N/D");
+  h += row("Modificaci\u00f3n", r.modDate || "N/D");
+  h += sec("Cifrado");
+  if (enc.encrypted) {
+    h += row("Cifrado", "S\u00ed");
+    h += row("Algoritmo", enc.algorithm);
+    h += row("Clave", enc.keyLength + " bits");
+    h += row("V / R", enc.V + " / " + enc.R);
+    h += row("Valor P", enc.P);
+  } else {
+    h += row("Cifrado", "No");
+  }
+  if (enc.permissions) {
+    h += sec("Permisos");
+    h += row("Imprimir", yn(enc.permissions.print));
+    h += row("Imprimir HQ", yn(enc.permissions.printHQ));
+    h += row("Modificar", yn(enc.permissions.modify));
+    h += row("Copiar texto", yn(enc.permissions.copy));
+    h += row("Anotaciones", yn(enc.permissions.annotate));
+    h += row("Formularios", yn(enc.permissions.fillForms));
+    h += row("Accesibilidad", yn(enc.permissions.accessibility));
+    h += row("Ensamblar", yn(enc.permissions.assemble));
+  }
+  h += sec("P\u00e1ginas");
+  for (var i = 0; i < r.pages.length && i < 5; i++) {
+    var p = r.pages[i];
+    h += row("P\u00e1g " + p.number, Math.round(p.widthPt) + " x " + Math.round(p.heightPt) + " pt");
+  }
+  if (r.pages.length > 5) h += row("", "...(" + (r.pages.length - 5) + " m\u00e1s)");
+  h += "</table>";
+  analysisPanel.innerHTML = h;
+  analysisSection.style.display = "block";
+}
+
+btnFlatten.addEventListener("click", function() {
+  btnFlatten.disabled = true;
+  logSection.style.display = "block";
+  resultSection.style.display = "none";
+  logPanel.textContent = "Iniciando aplanado...\n";
+
+  PdfFlatten.flatten(currentFile, usedPassword, {
+    scale: 2, quality: 0.92,
+    onProgress: function(p, t) { logPanel.textContent += "  P\u00e1gina " + p + " de " + t + "\n"; logPanel.scrollTop = logPanel.scrollHeight; }
+  }).then(function(flat) {
+    logPanel.textContent += "---\nPDF plano generado: " + flat.name + " (" + fmtB(flat.size) + ")\n";
+    logPanel.textContent += "\nEliminado: cifrado, contrase\u00f1as, restricciones,\nformularios, anotaciones, JavaScript y capas.\n";
+    logPanel.textContent += "Contenido visual id\u00e9ntico. Texto no seleccionable (rasterizado).\n";
+    var url = URL.createObjectURL(flat);
+    var a = document.createElement("a"); a.href = url; a.download = flat.name; a.click();
+    URL.revokeObjectURL(url);
+    var rh = "<table border='1' cellpadding='4' cellspacing='0'>";
+    rh += row("Nombre", flat.name);
+    rh += row("Tama\u00f1o", fmtB(flat.size));
+    rh += row("Cifrado", "Ninguno");
+    rh += row("Contrase\u00f1as", "Ninguna");
+    rh += row("Restricciones", "Ninguna");
+    rh += row("Texto seleccionable", "No (rasterizado)");
+    var pct = ((flat.size / currentFile.size) * 100).toFixed(0);
+    rh += row("Comparaci\u00f3n", fmtB(currentFile.size) + " &rarr; " + fmtB(flat.size) + " (" + pct + "% del original)");
+    rh += "</table>";
+    resultPanel.innerHTML = rh;
+    resultSection.style.display = "block";
+    btnFlatten.disabled = false;
+  }).catch(function(err) {
+    logPanel.textContent += "ERROR: " + err.message + "\n";
+    btnFlatten.disabled = false;
+  });
+});
+
+btnReset.addEventListener("click", function() { currentFile = null; usedPassword = undefined; fileInput.value = ""; reset(); });
+
+function reset() {
+  analysisSection.style.display = "none";
+  logSection.style.display = "none";
+  resultSection.style.display = "none";
+  analysisPanel.innerHTML = "";
+  logPanel.textContent = "";
+  resultPanel.innerHTML = "";
+  btnFlatten.disabled = true;
+  passwordRow.style.display = "none";
+  pdfPassword.value = "";
+}
+
+/* ============================
+   DEMO FORMULARIO
+   ============================ */
+var formPdfInput = document.getElementById("formPdfInput");
+var formStatus = document.getElementById("formStatus");
+var formLog = document.getElementById("formLog");
+var demoForm = document.getElementById("demoForm");
+var formCleanFile = null;
+
+formPdfInput.addEventListener("change", async function() {
+  var file = this.files[0];
+  if (!file) return;
+  formCleanFile = null;
+  formLog.textContent = "";
+  formStatus.textContent = "Procesando " + file.name + "...";
+  try {
+    var analysis = await PdfFlatten.analyze(file);
+    if (analysis.needsPassword) {
+      var pw = prompt("Contrase\u00f1a de apertura:");
+      if (!pw) { formStatus.textContent = "Cancelado."; return; }
+      analysis = await PdfFlatten.analyze(file, pw);
+      if (analysis.needsPassword) { formStatus.textContent = "Contrase\u00f1a incorrecta."; return; }
+      formCleanFile = await PdfFlatten.flatten(file, pw, { onProgress: function(p,t){ formLog.textContent += "Pag " + p + "/" + t + "\n"; } });
+    } else {
+      formCleanFile = await PdfFlatten.flatten(file, undefined, { onProgress: function(p,t){ formLog.textContent += "Pag " + p + "/" + t + "\n"; } });
+    }
+    formLog.textContent += "Listo: " + formCleanFile.name + " (" + fmtB(formCleanFile.size) + ")\n";
+    formStatus.textContent = "PDF limpio preparado: " + formCleanFile.name + ". Pulse Enviar.";
+  } catch(err) {
+    formStatus.textContent = "Error: " + err.message;
+  }
+});
+
+demoForm.addEventListener("submit", function(e) {
+  e.preventDefault();
+  if (!formCleanFile) { alert("Seleccione un PDF primero."); return; }
+  var fd = new FormData(demoForm);
+  fd.set("documento", formCleanFile, formCleanFile.name);
+  formLog.textContent += "---\nFormData listo para enviar:\n";
+  for (var pair of fd.entries()) {
+    formLog.textContent += pair[1] instanceof File
+      ? "  " + pair[0] + " = [File] " + pair[1].name + " (" + fmtB(pair[1].size) + ")\n"
+      : "  " + pair[0] + " = " + pair[1] + "\n";
+  }
+  formStatus.textContent = "FormData preparado. (Sin servidor en este ejemplo)";
+});
+
+/* ============================
+   HELPERS
+   ============================ */
+function sec(t) { return "<tr><td colspan='2' style='background:#ddd'><b>" + t + "</b></td></tr>"; }
+function row(l, v) { return "<tr><td><b>" + l + "</b></td><td>" + v + "</td></tr>"; }
+function yn(v) { return v ? "S\u00ed" : "No"; }
+function fmtB(b) { return b < 1024 ? b + " B" : b < 1048576 ? (b/1024).toFixed(1) + " KB" : (b/1048576).toFixed(2) + " MB"; }
+</script>
+</body>
+</html>
