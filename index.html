@@ -288,6 +288,23 @@ pdfjsLib.GlobalWorkerOptions.workerSrc =
    ============================================================ */
 var PdfFlatten = (function() {
 
+  // Normaliza un nombre de fichero: quita acentos, reemplaza caracteres
+  // problematicos por _ y colapsa repetidos. Conserva la extension.
+  function sanitizeName(name) {
+    var dot = name.lastIndexOf(".");
+    var ext = dot !== -1 ? name.substring(dot) : "";
+    var base = dot !== -1 ? name.substring(0, dot) : name;
+    // NFD descompone acentos, luego eliminamos los combining marks
+    base = base.normalize("NFD").replace(/[\u0300-\u036f]/g, "");
+    // Reemplazar cualquier caracter que no sea alfanumerico, guion o punto
+    base = base.replace(/[^a-zA-Z0-9._-]/g, "_");
+    // Colapsar guiones bajos multiples
+    base = base.replace(/_+/g, "_");
+    // Quitar _ al inicio o final
+    base = base.replace(/^_+|_+$/g, "");
+    return (base || "documento") + ext.toLowerCase();
+  }
+
   function readFile(file) {
     return new Promise(function(ok, fail) {
       var r = new FileReader();
@@ -348,8 +365,10 @@ var PdfFlatten = (function() {
       var vp = pg.getViewport({scale:1});
       pages.push({number:i, widthPt:vp.width, heightPt:vp.height});
     }
+    var safeName = sanitizeName(file.name);
     return {
       needsPassword:false, fileName:file.name, fileSize:file.size,
+      sanitizedName:safeName, nameChanged:safeName !== file.name,
       pdfVersion:mi.PDFFormatVersion||null, numPages:doc.numPages,
       creator:mi.Creator||null, producer:mi.Producer||null,
       creationDate:mi.CreationDate||null, modDate:mi.ModDate||null,
@@ -387,7 +406,7 @@ var PdfFlatten = (function() {
     newPdf.setProducer("PdfFlatten (pdf-lib)");
     newPdf.setCreationDate(new Date());
     var out = await newPdf.save();
-    var name = file.name.replace(/\.pdf$/i, "_pl.pdf");
+    var name = sanitizeName(file.name).replace(/\.pdf$/i, "_pl.pdf");
     return new File([out], name, {type:"application/pdf"});
   }
 
@@ -395,6 +414,9 @@ var PdfFlatten = (function() {
   // Devuelve un objeto { needed:bool, reasons:string[] }
   function needsFlatten(analysis) {
     var reasons = [];
+    if (analysis.nameChanged) {
+      reasons.push("Nombre con caracteres problem\u00e1ticos: " + analysis.fileName + " \u2192 " + analysis.sanitizedName);
+    }
     var enc = analysis.encryption;
     if (enc.encrypted) {
       reasons.push("Cifrado con " + enc.algorithm + " (" + enc.keyLength + " bits)");
@@ -413,12 +435,17 @@ var PdfFlatten = (function() {
     var a = await analyze(file, password);
     if (a.needsPassword) return {analysis:a, flatFile:null, skipped:false};
     var check = needsFlatten(a);
+    // Si solo hay que renombrar (sin cifrado), devolver el fichero original con nombre limpio
+    if (!a.encryption.encrypted && a.nameChanged) {
+      var renamed = new File([await readFile(file)], a.sanitizedName, {type:"application/pdf"});
+      return {analysis:a, flatFile:renamed, skipped:false, reasons:check.reasons, renamedOnly:true};
+    }
     if (!check.needed) return {analysis:a, flatFile:null, skipped:true, reasons:[]};
     var f = await flatten(file, password, opts);
     return {analysis:a, flatFile:f, skipped:false, reasons:check.reasons};
   }
 
-  return { analyze:analyze, flatten:flatten, process:process, needsFlatten:needsFlatten };
+  return { analyze:analyze, flatten:flatten, process:process, needsFlatten:needsFlatten, sanitizeName:sanitizeName };
 })();
 
 /* ============================================================
@@ -464,20 +491,23 @@ function doAnalysis(pw) {
     lastAnalysis = r;
     showAnalysis(r);
 
-    // Evaluar si necesita aplanado
+    // Evaluar si necesita acci\u00f3n
     var check = PdfFlatten.needsFlatten(r);
-    if (check.needed) {
+    if (check.needed && r.encryption.encrypted) {
+      // Cifrado: necesita aplanado completo
       btnFlatten.disabled = false;
       btnFlatten.textContent = "Generar PDF plano (_pl)";
+    } else if (check.needed && !r.encryption.encrypted) {
+      // Solo renombrado
+      btnFlatten.disabled = false;
+      btnFlatten.textContent = "Descargar con nombre corregido";
     } else {
       btnFlatten.disabled = true;
-      // Mostrar mensaje de que no necesita aplanado
       logSection.classList.remove("hidden");
-      logPanel.textContent = "El PDF no necesita aplanado.\n\n";
-      logPanel.textContent += "No se han detectado caracter\u00edsticas problem\u00e1ticas:\n";
-      logPanel.textContent += "  - Sin cifrado\n";
-      logPanel.textContent += "  - Sin restricciones de permisos\n";
-      logPanel.textContent += "  - Sin contrase\u00f1a de propietario\n";
+      logPanel.textContent = "El PDF no necesita ning\u00fan tratamiento.\n\n";
+      logPanel.textContent += "No se han detectado problemas:\n";
+      logPanel.textContent += "  - Sin cifrado ni restricciones\n";
+      logPanel.textContent += "  - Nombre de fichero correcto\n";
       logPanel.textContent += "\nEl fichero original se puede usar directamente.";
     }
   }).catch(function(e) {
@@ -490,6 +520,11 @@ function showAnalysis(r) {
   var e = r.encryption, h = "<table>";
   h += S("Informaci\u00f3n general");
   h += R("Fichero", r.fileName);
+  if (r.nameChanged) {
+    h += R("Nombre normalizado", "<span class='no'>" + r.sanitizedName + "</span> (se renombrar\u00e1)");
+  } else {
+    h += R("Nombre", "<span class='yes'>OK (sin caracteres problem\u00e1ticos)</span>");
+  }
   h += R("Tama\u00f1o", fmtB(r.fileSize));
   h += R("Versi\u00f3n", r.pdfVersion ? "PDF "+r.pdfVersion : "N/D");
   h += R("P\u00e1ginas", r.numPages);
@@ -543,10 +578,43 @@ btnFlatten.addEventListener("click", function() {
   logSection.classList.remove("hidden");
   resultSection.classList.add("hidden");
   logPanel.textContent = "";
+
+  // Caso 1: solo renombrar (sin cifrado)
+  if (lastAnalysis && !lastAnalysis.encryption.encrypted && lastAnalysis.nameChanged) {
+    log("El PDF no tiene cifrado ni restricciones.");
+    log("Solo se corrige el nombre del fichero:");
+    log("  " + lastAnalysis.fileName + " \u2192 " + lastAnalysis.sanitizedName);
+    log("");
+    PdfFlatten.analyze(currentFile, usedPassword).then(function() {
+      return currentFile.arrayBuffer();
+    }).then(function(buf) {
+      var renamed = new File([buf], lastAnalysis.sanitizedName, {type:"application/pdf"});
+      var url = URL.createObjectURL(renamed);
+      var a = document.createElement("a"); a.href=url; a.download=renamed.name; a.click();
+      URL.revokeObjectURL(url);
+      log("Descargado: " + renamed.name + " (" + fmtB(renamed.size) + ")");
+      log("El contenido del PDF no se ha modificado.");
+      var rh = "<table>";
+      rh += R("Nombre original", lastAnalysis.fileName);
+      rh += R("Nombre corregido", renamed.name);
+      rh += R("Tama\u00f1o", fmtB(renamed.size) + " (sin cambios)");
+      rh += R("Contenido", "<span class='yes'>Id\u00e9ntico al original (no se ha aplanado)</span>");
+      rh += "</table>";
+      resultPanel.innerHTML = rh;
+      resultSection.classList.remove("hidden");
+      btnFlatten.disabled = false;
+    });
+    return;
+  }
+
+  // Caso 2: aplanado completo
   progressWrap.style.display = "block";
   progressFill.style.width = "0%";
   log("Iniciando aplanado...");
   log("Cada p\u00e1gina se renderiza a imagen (2x) y se inserta en un PDF nuevo y limpio.");
+  if (lastAnalysis && lastAnalysis.nameChanged) {
+    log("Adem\u00e1s se corrige el nombre: " + lastAnalysis.fileName + " \u2192 " + lastAnalysis.sanitizedName);
+  }
   log("");
 
   PdfFlatten.flatten(currentFile, usedPassword, {
